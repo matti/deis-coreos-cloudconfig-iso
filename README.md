@@ -19,7 +19,7 @@ Create deis.io CoreOS config drives for vmware ESXi installations
 
 And then test with:
 
-	curl -X POST -F ssh_key=@/Users/mpa/.ssh/id_rsa.pub -F ip=192.168.0.20 -F etcd_url="http://lolcat/com" 192.168.59.103:3000/configdrive.iso
+	curl -X POST -F ssh_key=@/Users/mpa/.ssh/id_rsa.pub -F ip=192.168.0.20 -F etcd_url="http://lolcat/com" 192.168.59.103:3000/configdrive.iso -O
 
 
 NOTE: Do not deploy with docker, but with git push heroku master (heroku does not install mkisofs this way)

@@ -14,10 +14,15 @@ post "/configdrive.iso" do
   ssh_key_contents = ssh_key_file.read
   ssh_key_contents.strip!
 
-  user_data_contents = File.read "./user_data.template"
-  user_data_contents.gsub! "%%IPADDRESS%%", ip_address
-  user_data_contents.gsub! "%%ETCDURL%%", etcd_url
-  user_data_contents.gsub! "%%SSHKEY%%", ssh_key_contents
+  user_data_contents = if params[:template] && params[:template][:tempfile]
+    params[:template][:tempfile].read
+  else
+    File.read "./user_data.template"
+  end
+
+  user_data_contents.gsub! "#cloud-config\n---\n", "#cloud-config\n---\nssh_authorized_keys:\n  - #{ssh_key_contents}\n"
+  user_data_contents.gsub! "$private_ipv4", ip_address
+  user_data_contents.sub! /discovery: http.*/, "discovery: #{etcd_url}"
 
   File.write "./user_data", user_data_contents
 

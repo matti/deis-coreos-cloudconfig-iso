@@ -1,14 +1,12 @@
 #cloud-config
 ---
-ssh_authorized_keys:
-  - %%SSHKEY%%
 coreos:
   etcd:
     # generate a new token for each unique cluster from https://discovery.etcd.io/new
     # uncomment the following line and replace it with your discovery URL
-    discovery: %%ETCDURL%%
-    addr: %%IPADDRESS%%:4001
-    peer-addr: %%IPADDRESS%%:7001
+    discovery: https://discovery.etcd.io/deb9ae1e0e75de748b38724c8c67710d
+    addr: $private_ipv4:4001
+    peer-addr: $private_ipv4:7001
     # give etcd more time if it's under heavy load - prevent leader election thrashing
     peer-election-timeout: 2000
     # heartbeat interval should ideally be 1/4 or 1/5 of peer election timeout
@@ -16,12 +14,24 @@ coreos:
   fleet:
     # We have to set the public_ip here so this works on Vagrant -- otherwise, Vagrant VMs
     # will all publish the same private IP. This is harmless for cloud providers.
-    public-ip: %%IPADDRESS%%
+    public-ip: $private_ipv4
     # allow etcd to slow down at times
     etcd_request_timeout: 3.0
   units:
   - name: etcd.service
     command: start
+  - name: upgrade-fleet-091.service
+    command: start
+    content: |
+      [Unit]
+      Description=Upgrade fleet if system fleet is v0.9.1, which has a known bug
+      Before=fleet.service
+      ConditionPathIsSymbolicLink=!/etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf
+
+      [Service]
+      ExecStart=/usr/bin/bash -c 'if fleetd --version | grep -q 0.9.1; then curl -sSL --retry 5 --retry-delay 2 -o /opt/bin/fleetd-0.9.2 https://s3-us-west-2.amazonaws.com/opdemand/fleetd-v0.9.2 && chmod +x /opt/bin/fleetd-0.9.2 && mkdir -p /etc/systemd/system/fleet.service.d/ && ln -sf /opt/conf/fleetd-092-custom-binary.conf /etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf; else rm -f /etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf; fi'
+      RemainAfterExit=yes
+      Type=oneshot
   - name: docker-tcp.socket
     command: start
     enable: true
@@ -45,22 +55,6 @@ coreos:
       Type=oneshot
       ExecStart=/usr/bin/systemctl stop update-engine.service
       ExecStartPost=/usr/bin/systemctl mask update-engine.service
-  - name: graceful-deis-shutdown.service
-    content: |
-      [Unit]
-      Description=Clean up
-      DefaultDependencies=no
-      After=fleet.service etcd.service docker.service docker.socket deis-store-admin.service deis-store-daemon.service deis-store-volume.service deis-store-monitor.service
-      Requires=fleet.service etcd.service deis-store-admin.service deis-store-daemon.service deis-store-volume.service docker.service docker.socket deis-store-monitor.service
-
-      [Install]
-      WantedBy=shutdown.target halt.target reboot.target
-
-      [Service]
-      ExecStop=/opt/bin/graceful-shutdown.sh --really
-      Type=oneshot
-      TimeoutSec=1200
-      RemainAfterExit=yes
   - name: install-deisctl.service
     command: start
     content: |
@@ -176,8 +170,8 @@ write_files:
   - path: /home/core/.toolboxrc
     owner: core
     content: |
-      TOOLBOX_DOCKER_IMAGE=alpine
-      TOOLBOX_DOCKER_TAG=3.1
+      TOOLBOX_DOCKER_IMAGE=ubuntu-debootstrap
+      TOOLBOX_DOCKER_TAG=14.04
       TOOLBOX_USER=root
   - path: /etc/environment_proxy
     owner: core
@@ -194,61 +188,8 @@ write_files:
     content: |
       [Coredump]
       Storage=none
-  - path: /opt/bin/graceful-shutdown.sh
-    permissions: '0755'
+  - path: /opt/conf/fleetd-092-custom-binary.conf
     content: |
-      #!/usr/bin/bash
-      if [ "$1" != '--really' ]; then
-        echo "command must be run as: $0 --really"
-        exit 1
-      fi
-      # procedure requires the store-admin
-      ADMIN_RUNNING=$(docker inspect --format="{{ .State.Running }}" deis-store-admin)
-      if [ $? -eq 1 ] || [ "$ADMIN_RUNNING" == "false" ]; then
-        echo "deis-store-admin container is required for graceful shutdown"
-        exit 2
-      fi
-      set -e -x -o pipefail
-      # determine osd id
-      CURRENT_STATUS=$(/usr/bin/docker exec deis-store-admin ceph health | awk '{print $1}')
-      OSD_HOSTS=($(/usr/bin/etcdctl ls /deis/store/hosts/| awk -F'/' '{print $5}'))
-      for HOST in "${OSD_HOSTS[@]}"
-      do
-        PUBLIC_IP=$(fleetctl list-machines -fields="machine,ip" -full -no-legend| grep `cat /etc/machine-id` | awk '{print $2}')
-        if [ "$HOST" = "$PUBLIC_IP" ] ; then
-          OSD_ID=$(/usr/bin/etcdctl get /deis/store/osds/$PUBLIC_IP)
-          break
-        fi
-      done
-      # if we own an osd and its healthy, try to gracefully remove it
-      if [ ! -z "$OSD_ID" ] && [[ "$CURRENT_STATUS" == *"HEALTH_OK"* ]] && [ ${#OSD_HOSTS[@]} -gt "3" ]; then
-        /usr/bin/docker exec deis-store-admin ceph osd out $OSD_ID
-        sleep 30
-        TIMEWAITED=0
-        until [[ $(/usr/bin/docker exec deis-store-admin ceph health) == *"HEALTH_OK"* ]]
-        do
-          if [ $TIMEWAITED -gt "1200" ]
-          then
-            echo "ceph graceful removal timeout exceeded"
-            break
-          fi
-          echo "waiting" && sleep 5
-          TIMEWAITED=$((TIMEWAITED+5))
-        done
-        /usr/bin/docker stop deis-store-daemon
-        /usr/bin/docker exec deis-store-admin ceph osd crush remove osd.$OSD_ID
-        /usr/bin/docker exec deis-store-admin ceph auth del osd.$OSD_ID
-        /usr/bin/docker exec deis-store-admin ceph osd rm $OSD_ID
-        /usr/bin/etcdctl rm /deis/store/osds/$PUBLIC_IP
-        etcdctl rm /deis/store/hosts/$PUBLIC_IP && sleep 10
-        # remove ceph mon
-        /usr/bin/docker stop deis-store-monitor || true
-        /usr/bin/docker exec deis-store-admin ceph mon remove `hostname -f` # fixme
-        /usr/bin/docker stop deis-store-metadata || true
-      fi
-      NODE=$(curl -L http://127.0.0.1:7001/v2/admin/machines/`cat /etc/machine-id`)
-      # remove from etcd cluster
-      if [ $NODE != 'null' ]; then
-        /usr/bin/curl -L -XDELETE http://127.0.0.1:7001/v2/admin/machines/`cat /etc/machine-id`
-      fi
-manage_etc_hosts: localhost
+      [Service]
+      ExecStart=
+      ExecStart=/opt/bin/fleetd-0.9.2
