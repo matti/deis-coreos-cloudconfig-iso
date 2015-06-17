@@ -18,6 +18,17 @@ coreos:
     # allow etcd to slow down at times
     etcd_request_timeout: 3.0
   units:
+  - name: 00-eno1.network
+    runtime: true
+    content: |
+      [Match]
+      MACAddress=%%MAC_ADDRESS%%
+
+      [Network]
+      DNS=%%DNS_PRIMARY%%
+      DNS=%%DNS_SECONDARY%%
+      Address=$private_ipv4/24
+      Gateway=%%GATEWAY_IP%%
   - name: etcd.service
     command: start
   - name: upgrade-fleet-091.service

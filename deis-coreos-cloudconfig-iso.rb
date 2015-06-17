@@ -24,6 +24,17 @@ post "/configdrive.iso" do
   user_data_contents.gsub! "$private_ipv4", ip_address
   user_data_contents.sub! /discovery: http.*/, "discovery: #{etcd_url}"
 
+  mac_address = params[:mac_address]
+  dns_primary = params[:dns_primary]
+  dns_secondary = params[:dns_secondary]
+  gateway_ip = params[:gateway_ip]
+
+  user_data_contents.gsub! "%%MAC_ADDRESS%%", mac_address
+  user_data_contents.gsub! "%%DNS_PRIMARY%%", dns_primary
+  user_data_contents.gsub! "%%DNS_SECONDARY%%", dns_secondary
+  user_data_contents.gsub! "%%GATEWAY_IP%%", gateway_ip
+
+
   File.write "./user_data", user_data_contents
 
   ok = system "./makedrive.sh"
